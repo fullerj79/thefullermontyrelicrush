@@ -112,7 +112,6 @@ def get_mongo_client(uri: str, timeout_ms: int = 15000) -> MongoClient:
 
 def mongo_ping_debug(uri: str, timeout_ms: int = 15000) -> dict:
     out = {"ok": False, "ping_ok": False, "timeout_ms": timeout_ms, "dbs": [], "error": None, "traceback": None}
-
     try:
         client = get_mongo_client(uri, timeout_ms=timeout_ms)
         client.admin.command("ping")
@@ -192,7 +191,7 @@ def build_debug_text() -> str:
             lines.append(f"srv_error:      {srv['error']}")
 
         lines.append("")
-        lines.append("=== DNS CHECK FOR SHARD HOSTS (these SHOULD resolve) ===")
+        lines.append("=== DNS CHECK FOR SHARD HOSTS ===")
         if shard_hosts:
             for h in shard_hosts:
                 res = resolve_host_ips(h)
@@ -225,19 +224,48 @@ def build_debug_text() -> str:
     return "\n".join(lines)
 
 
-# ---------------- Dash app (minimal) ----------------
+# ---------------- Dash app ----------------
 
 app = dash.Dash(__name__)
+app.config.suppress_callback_exceptions = True
 server = app.server
+
+# ✅ Always show something immediately (even if callbacks die)
+INITIAL_TEXT = ""
+try:
+    INITIAL_TEXT = build_debug_text()
+except Exception as e:
+    INITIAL_TEXT = "INITIAL BUILD FAILED:\n" + traceback.format_exc()
+
+# ✅ Health endpoint for Render
+@server.route("/health")
+def health():
+    return {
+        "ok": True,
+        "utc": datetime.now(timezone.utc).isoformat(),
+        "start_utc": APP_START_UTC.isoformat(),
+    }
+
 
 app.layout = html.Div(
     [
         html.H3("MongoDB Atlas Debug Dashboard"),
+        html.Div("If this stays stuck, check /health endpoint and Render logs."),
+
+        html.Div(
+            [
+                html.A("Health check", href="/health", target="_blank"),
+            ],
+            style={"marginBottom": "8px"},
+        ),
+
         html.Button("REFRESH", id="refresh-btn", n_clicks=0),
         dcc.Interval(id="auto-refresh", interval=15_000, n_intervals=0),
+
+        # ✅ renders immediately, then callback replaces it
         html.Pre(
             id="debug-output",
-            children="(loading...)",
+            children=INITIAL_TEXT,
             style={
                 "border": "1px solid #000",
                 "padding": "12px",

@@ -1,6 +1,7 @@
 import os
 from datetime import datetime, timezone
 
+import certifi
 from pymongo import MongoClient
 from pymongo.errors import PyMongoError
 from dotenv import load_dotenv
@@ -9,13 +10,35 @@ import dash
 from dash import html, dcc
 from dash.dependencies import Input, Output
 
+load_dotenv()  # loads .env locally; harmless on Render
 
-load_dotenv()  # loads .env into environment (safe if .env doesn't exist)
+# --- Mongo client: reuse (connection pool) ---
+_mongo_client = None
 
-MONGODB_URI = os.getenv("MONGODB_URI")
+
+def get_mongo_client(uri: str, timeout_ms: int = 15000) -> MongoClient:
+    """
+    Create/reuse a MongoClient with TLS + certifi CA bundle.
+    Reusing the client is recommended (pooling).
+    """
+    global _mongo_client
+
+    if _mongo_client is None:
+        _mongo_client = MongoClient(
+            uri,
+            # Fixes many SSL/TLS handshake issues on hosted platforms
+            tls=True,
+            tlsCAFile=certifi.where(),
+            # Timeouts: Render cold starts / DNS can be slow
+            serverSelectionTimeoutMS=timeout_ms,
+            connectTimeoutMS=timeout_ms,
+            socketTimeoutMS=timeout_ms,
+        )
+
+    return _mongo_client
 
 
-def check_mongo_connection(uri: str, timeout_ms: int = 3000) -> dict:
+def check_mongo_connection(timeout_ms: int = 15000) -> dict:
     """
     Returns a dict with:
       ok: bool
@@ -25,46 +48,47 @@ def check_mongo_connection(uri: str, timeout_ms: int = 3000) -> dict:
     """
     checked_at = datetime.now(timezone.utc)
 
+    # Read env at runtime (best practice for deployment platforms)
+    uri = os.getenv("MONGODB_URI")
+
     if not uri:
         return {
             "ok": False,
             "message": "Not configured",
-            "details": "Missing env var MONGODB_URI (set it in .env or system env).",
+            "details": "Missing env var MONGODB_URI (set it in Render or your local .env).",
             "checked_at": checked_at,
         }
 
-    client = None
     try:
-        client = MongoClient(
-            uri,
-            serverSelectionTimeoutMS=timeout_ms,
-            connectTimeoutMS=timeout_ms,
-            socketTimeoutMS=timeout_ms,
-        )
-        # This will force a server selection + round trip
+        client = get_mongo_client(uri, timeout_ms=timeout_ms)
+
+        # Force a round trip
         client.admin.command("ping")
-        # optional: grab a little info
+
+        # Optional: list a few db names (might be empty depending on user perms)
         dbs = client.list_database_names()
+
         return {
             "ok": True,
             "message": "Connected ✅",
             "details": f"Ping OK. Visible DBs: {', '.join(dbs[:10])}" + ("..." if len(dbs) > 10 else ""),
             "checked_at": checked_at,
         }
+
     except PyMongoError as e:
         return {
             "ok": False,
-            "message": "Connection failed",
+            "message": "Connection failed ❌",
             "details": f"{type(e).__name__}: {e}",
             "checked_at": checked_at,
         }
-    finally:
-        if client is not None:
-            client.close()
 
+
+# --- Dash app ---
 app = dash.Dash(__name__)
 app.title = "MongoDB Connection Status"
 
+# Expose server for Render / gunicorn
 server = app.server
 
 app.layout = html.Div(
@@ -77,9 +101,7 @@ app.layout = html.Div(
     },
     children=[
         html.H1("MongoDB Atlas Connection Status"),
-        html.P(
-            "This page pings your MongoDB Atlas cluster using the MONGODB_URI environment variable."
-        ),
+        html.P("This page pings your MongoDB Atlas cluster using the MONGODB_URI environment variable."),
 
         html.Div(
             id="status-card",
@@ -113,7 +135,7 @@ app.layout = html.Div(
                         "background": "white",
                     },
                 ),
-                dcc.Interval(id="auto-refresh", interval=10_000, n_intervals=0),  # every 10s
+                dcc.Interval(id="auto-refresh", interval=10_000, n_intervals=0),  # every 10 seconds
                 html.Div("Auto refresh: every 10 seconds", style={"color": "#666", "fontSize": "13px"}),
             ],
         ),
@@ -130,15 +152,15 @@ app.layout = html.Div(
     Input("auto-refresh", "n_intervals"),
 )
 def update_status(_clicks, _ticks):
-    result = check_mongo_connection(MONGODB_URI)
+    result = check_mongo_connection(timeout_ms=15000)
 
-    # card styling based on status
     card_style = {
         "border": "1px solid #ddd",
         "borderRadius": "12px",
         "padding": "16px",
         "background": "#fafafa",
     }
+
     if result["ok"]:
         card_style["border"] = "1px solid #cce5cc"
         card_style["background"] = "#f3fff3"
@@ -146,11 +168,12 @@ def update_status(_clicks, _ticks):
         card_style["border"] = "1px solid #f2c2c2"
         card_style["background"] = "#fff5f5"
 
-    checked_local = result["checked_at"].astimezone()  # local time
+    checked_local = result["checked_at"].astimezone()
     time_text = f"Last checked: {checked_local.strftime('%Y-%m-%d %H:%M:%S %Z')}"
 
     return result["message"], result["details"], time_text, card_style
 
 
 if __name__ == "__main__":
+    # Local dev only. On Render you'll run via gunicorn typically.
     app.run(debug=True)

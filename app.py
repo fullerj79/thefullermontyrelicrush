@@ -54,7 +54,7 @@ def check_mongo_connection(uri: str, timeout_ms: int = 3000) -> dict:
     except PyMongoError as e:
         return {
             "ok": False,
-            "message": "Connection failed ❌",
+            "message": "Connection failed",
             "details": f"{type(e).__name__}: {e}",
             "checked_at": checked_at,
         }
